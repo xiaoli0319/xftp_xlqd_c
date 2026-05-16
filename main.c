@@ -227,6 +227,20 @@ static void fmt_size(char *buf, int len, off_t size) {
 }
 
 // ─── Transfer ───
+static volatile int xfer_cancel = 0;
+
+// 检查传输中是否有取消按键（非阻塞）
+static int check_cancel(void) {
+    nodelay(stdscr, TRUE);
+    int ch = getch();
+    nodelay(stdscr, FALSE);
+    if (ch == 27 || ch == 'q' || ch == 'Q') {  // Escape 或 q
+        xfer_cancel = 1;
+        return 1;
+    }
+    return 0;
+}
+
 static int xfer_download(const char *rpath, const char *lpath) {
     LIBSSH2_SFTP_HANDLE *rf = libssh2_sftp_open(sftp, rpath, LIBSSH2_FXF_READ, 0);
     if (!rf) return -1;
@@ -239,18 +253,21 @@ static int xfer_download(const char *rpath, const char *lpath) {
     char buf[65536]; int n; off_t done = 0;
     char sdone[32], stotal[32], smsg[80];
     while ((n = libssh2_sftp_read(rf, buf, sizeof(buf))) > 0) {
+        if (xfer_cancel) break;
         fwrite(buf, 1, n, lf); done += n;
         if (total > 0) {
             int pct = (int)(done * 100 / total);
             fmt_size(sdone, 32, done); fmt_size(stotal, 32, total);
-            snprintf(smsg, 80, "下载：%d%%（%s/%s）", pct, sdone, stotal);
+            snprintf(smsg, 80, "下载：%d%%（%s/%s）  Esc=取消", pct, sdone, stotal);
         } else {
             fmt_size(sdone, 32, done);
-            snprintf(smsg, 80, "下载：%s", sdone);
+            snprintf(smsg, 80, "下载：%s  Esc=取消", sdone);
         }
         status_draw(smsg, 0);
+        check_cancel();
     }
     fclose(lf); libssh2_sftp_close(rf);
+    if (xfer_cancel) { unlink(lpath); return -2; }
     return 0;
 }
 
@@ -264,13 +281,16 @@ static int xfer_upload(const char *lpath, const char *rpath) {
     char buf[65536]; int n; off_t done = 0;
     char sdone[32], stotal[32], smsg[80];
     while ((n = fread(buf, 1, sizeof(buf), lf)) > 0) {
+        if (xfer_cancel) break;
         libssh2_sftp_write(rf, buf, n); done += n;
         int pct = (int)(done * 100 / total);
         fmt_size(sdone, 32, done); fmt_size(stotal, 32, total);
-        snprintf(smsg, 80, "上传：%d%%（%s/%s）", pct, sdone, stotal);
+        snprintf(smsg, 80, "上传：%d%%（%s/%s）  Esc=取消", pct, sdone, stotal);
         status_draw(smsg, 0);
+        check_cancel();
     }
     fclose(lf); libssh2_sftp_close(rf);
+    if (xfer_cancel) { libssh2_sftp_unlink(sftp, rpath); return -2; }
     return 0;
 }
 
@@ -430,22 +450,23 @@ static void op_transfer(void) {
     Entry *e = &src->e[src->sel];
     if (e->is_dir) return;
 
+    xfer_cancel = 0;
     if (act == 1) {  // remote → local
         char lp[1024]; path_join(lp, ent[0].path, e->name);
         char msg[256]; snprintf(msg,256,"下载 %s 到本地？", e->name);
         if (!confirm_dialog(msg)) return;
-        if (xfer_download(e->name, lp) == 0) {
-            local_read(ent[0].path);
-            refresh_all("下载完成", 0);
-        } else refresh_all("下载失败", 1);
+        int r = xfer_download(e->name, lp);
+        if (r == 0) { local_read(ent[0].path); refresh_all("下载完成", 0); }
+        else if (r == -2) { unlink(lp); refresh_all("已取消", 1); }
+        else refresh_all("下载失败", 1);
     } else {  // local → remote
         char rp[1024]; path_join(rp, ent[1].path, e->name);
         char msg[256]; snprintf(msg,256,"上传 %s 到远程？", e->name);
         if (!confirm_dialog(msg)) return;
-        if (xfer_upload(e->name, rp) == 0) {
-            remote_read(ent[1].path);
-            refresh_all("上传完成", 0);
-        } else refresh_all("上传失败", 1);
+        int r = xfer_upload(e->name, rp);
+        if (r == 0) { remote_read(ent[1].path); refresh_all("上传完成", 0); }
+        else if (r == -2) { refresh_all("已取消", 1); }
+        else refresh_all("上传失败", 1);
     }
 }
 
