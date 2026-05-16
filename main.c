@@ -210,14 +210,15 @@ static WINDOW *w_pane[2], *w_status;
 
 static void ui_init(void) {
     initscr(); cbreak(); noecho(); keypad(stdscr, TRUE); curs_set(0);
+    use_default_colors();
     start_color();
-    init_pair(1, COLOR_CYAN, COLOR_BLUE);   // active pane border/title
-    init_pair(2, COLOR_WHITE, COLOR_BLUE);   // active pane content
-    init_pair(3, COLOR_WHITE, COLOR_BLACK);  // inactive pane
-    init_pair(4, COLOR_YELLOW, COLOR_BLACK); // directory name
-    init_pair(5, COLOR_RED, COLOR_BLACK);    // status error
-    init_pair(6, COLOR_GREEN, COLOR_BLACK);  // status ok
-    init_pair(7, COLOR_BLACK, COLOR_WHITE);  // selected item
+    init_pair(1, COLOR_CYAN, -1);   // active pane border/title
+    init_pair(2, COLOR_WHITE, COLOR_BLUE);   // active pane content (keep for selection bar)
+    init_pair(3, COLOR_WHITE, -1);  // inactive pane
+    init_pair(4, COLOR_YELLOW, -1); // directory name
+    init_pair(5, COLOR_RED, -1);    // status error
+    init_pair(6, COLOR_GREEN, -1);  // status ok
+    init_pair(7, COLOR_BLACK, COLOR_WHITE);  // selected item (keep highlight)
     // Create pane windows once
     int rows, cols; getmaxyx(stdscr, rows, cols);
     int pw = (cols - 3) / 2;
@@ -284,9 +285,8 @@ static void pane_draw(int side) {
         if (sel) wattroff(w, COLOR_PAIR(7));
         else if (e->is_dir) wattroff(w, COLOR_PAIR(4));
     }
-    wnoutrefresh(w);
+    wrefresh(w);
 }
-
 static void status_draw(const char *msg, int is_err) {
     int rows, cols; getmaxyx(stdscr, rows, cols);
     if (!w_status) {
@@ -297,7 +297,7 @@ static void status_draw(const char *msg, int is_err) {
     else wattron(w_status, COLOR_PAIR(6));
     wprintw(w_status, "  %-*s", cols-3, msg ? msg : "");
     wattroff(w_status, COLOR_PAIR(is_err ? 5 : 6));
-    wnoutrefresh(w_status);
+    wrefresh(w_status);
 }
 
 static void refresh_all(const char *msg, int is_err) {
@@ -305,10 +305,10 @@ static void refresh_all(const char *msg, int is_err) {
     move(0, 0); clrtoeol(); attron(A_BOLD);
     mvprintw(0, (cols-12)/2, "  xFTP xl_qd  ");
     attroff(A_BOLD);
-    mvprintw(rows-2, 0, "  Tab=切换  Enter=进入  F5=传输  F7=新建目录  F8=删除  F10=退出");
+    mvprintw(rows-2, 0, "  Tab=切换  Shift+方向=进目录  Enter=进入  F5=传输  F7=新建  F8=删除  F10=退出");
+    wnoutrefresh(stdscr);
     pane_draw(0); pane_draw(1);
     status_draw(msg, is_err);
-    doupdate();
 }
 
 // ─── Dialogs ───
@@ -465,6 +465,28 @@ int main(void) {
                 if (en->sel < en->n - 1) en->sel++;
                 break;
 
+            case KEY_SLEFT:  // Shift+← 进本地目录
+                {
+                Entries *le = &ent[0];
+                if (le->n > 0 && le->sel >= 0 && le->sel < le->n && le->e[le->sel].is_dir) {
+                    char buf[256]; strcpy(buf, le->e[le->sel].name);
+                    local_cd(buf);
+                    le->sel = 0; le->scr = 0;
+                }
+                }
+                break;
+
+            case KEY_SRIGHT:  // Shift+→ 进远程目录
+                {
+                Entries *re = &ent[1];
+                if (re->n > 0 && re->sel >= 0 && re->sel < re->n && re->e[re->sel].is_dir) {
+                    char buf[256]; strcpy(buf, re->e[re->sel].name);
+                    remote_cd(buf);
+                    re->sel = 0; re->scr = 0;
+                }
+                }
+                break;
+
             case KEY_PPAGE:  // PageUp
                 {
                 int ph;
@@ -521,7 +543,9 @@ int main(void) {
                 break;
 
             case KEY_RESIZE:
-                // handled by refresh_all() on next loop
+                break;
+
+            default:
                 break;
         }
     }
