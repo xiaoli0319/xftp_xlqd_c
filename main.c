@@ -263,20 +263,14 @@ static void ui_init(void) {
 static void ui_end(void) { endwin(); }
 
 static void pane_draw(int side) {
-    int rows, cols; getmaxyx(stdscr, rows, cols);
-    int pw = (cols - 3) / 2, ph = rows - 4;
-    int px = side ? pw + 3 : 0;
-    // Recreate windows on terminal resize or if not yet created
     if (!w_pane[side]) {
+        int rows, cols; getmaxyx(stdscr, rows, cols);
+        int pw = (cols - 3) / 2, ph = rows - 4;
+        int px = side ? pw + 3 : 0;
         w_pane[side] = newwin(ph, pw, 2, px);
-    } else {
-        int wy, wx; getbegyx(w_pane[side], wy, wx);
-        if (wx != px || wy != 2 || getmaxy(w_pane[side]) != ph || getmaxx(w_pane[side]) != pw) {
-            delwin(w_pane[side]);
-            w_pane[side] = newwin(ph, pw, 2, px);
-        }
     }
     WINDOW *w = w_pane[side];
+    int pw = getmaxx(w), ph = getmaxy(w);
     int hi = side == act;
     werase(w);
     wattron(w, COLOR_PAIR(hi ? 1 : 3));
@@ -731,9 +725,6 @@ int main(void) {
                 break;
 
             case KEY_RESIZE:
-                if (w_pane[0]) { delwin(w_pane[0]); w_pane[0]=NULL; }
-                if (w_pane[1]) { delwin(w_pane[1]); w_pane[1]=NULL; }
-                if (w_status) { delwin(w_status); w_status=NULL; }
                 break;
 
             default:
