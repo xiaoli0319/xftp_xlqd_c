@@ -27,6 +27,9 @@ typedef struct { Entry *e; int n, cap, sel, scr; char path[1024]; } Entries;
 
 static Entries ent[2];  // 0=local, 1=remote
 static int act = 0;      // active pane
+static int show_hidden = 0;
+static int path_edit = 0;  // path editing mode
+static char path_buf[1024];
 
 // ─── SFTP Session ───
 static LIBSSH2_SESSION *ssh = NULL;
@@ -36,6 +39,12 @@ static int sock = -1;
 // ─── Connection Config ───
 static char cfg_host[128] = "", cfg_user[64] = "", cfg_pass[128] = "";
 static int cfg_port = 22;
+#define MAX_HOSTS 32
+static int cfg_host_n = 0;
+static char cfg_hosts[MAX_HOSTS][256];
+static char cfg_hosts_path[576];
+
+// ─── Path helpers ───
 
 // ─── Path helpers ───
 static void path_join(char *dst, const char *a, const char *b) {
@@ -51,12 +60,20 @@ static void cfg_save(void) {
     mkdir(d, 0755);
     char p[576]; snprintf(p, 576, "%s/config", d);
     FILE *f = fopen(p, "w"); if (!f) return;
-    fprintf(f, "host=%s\nuser=%s\nport=%d\n", cfg_host, cfg_user, cfg_port);
+    fprintf(f, "host=%s\nuser=%s\nport=%d\npass=%s\n", cfg_host, cfg_user, cfg_port, cfg_pass);
+    fclose(f);
+    // Save hosts list
+    char hp[576]; snprintf(hp, 576, "%s/hosts", d);
+    f = fopen(hp, "w"); if (!f) return;
+    for (int i = 0; i < cfg_host_n; i++) fprintf(f, "%s\n", cfg_hosts[i]);
     fclose(f);
 }
 static void cfg_load(void) {
     struct passwd *pw = getpwuid(getuid());
-    char p[576]; snprintf(p, 576, "%s/%s/config", pw->pw_dir, CFG_DIR);
+    char d[512]; snprintf(d, 512, "%s/%s", pw->pw_dir, CFG_DIR);
+    mkdir(d, 0755);
+    snprintf(cfg_hosts_path, 576, "%s/hosts", d);
+    char p[576]; snprintf(p, 576, "%s/config", d);
     FILE *f = fopen(p, "r"); if (!f) return;
     char line[256];
     while (fgets(line, 256, f)) {
@@ -65,7 +82,15 @@ static void cfg_load(void) {
             if (!strcmp(k,"host")) strncpy(cfg_host, v, 127);
             else if (!strcmp(k,"user")) strncpy(cfg_user, v, 63);
             else if (!strcmp(k,"port")) cfg_port = atoi(v);
+            else if (!strcmp(k,"pass")) strncpy(cfg_pass, v, 127);
         }
+    }
+    fclose(f);
+    // Load hosts list
+    cfg_host_n = 0; f = fopen(cfg_hosts_path, "r"); if (!f) return;
+    while (fgets(line, 256, f) && cfg_host_n < MAX_HOSTS) {
+        line[strcspn(line, "\n")] = 0;
+        if (line[0]) strncpy(cfg_hosts[cfg_host_n++], line, 255);
     }
     fclose(f);
 }
@@ -104,6 +129,7 @@ static int local_read(const char *path) {
     char fp[1024];
     while ((de = readdir(d))) {
         if (!strcmp(de->d_name,".")) continue;
+        if (de->d_name[0] == '.' && strcmp(de->d_name,"..") && !show_hidden) continue;
         path_join(fp, path, de->d_name);
         int is_dir = 0;
         if (stat(fp, &st) == 0) is_dir = S_ISDIR(st.st_mode);
@@ -117,9 +143,10 @@ static int local_cd(const char *sub) {
     char np[1024];
     if (!strcmp(sub,"..")) {
         char *s = strrchr(ent[0].path, '/');
-        if (s && s != ent[0].path) { *s = 0; return local_read(ent[0].path); }
+        if (s == ent[0].path && s[1] == 0) return local_read("/");
+        if (s) { *s = 0; return local_read(ent[0].path); }
+        return 0;
     } else { path_join(np, ent[0].path, sub); return local_read(np); }
-    return 0;
 }
 
 // ─── Remote SFTP ───
@@ -152,7 +179,8 @@ static int remote_read(const char *path) {
     if (!h) return -1;
     char name[512]; LIBSSH2_SFTP_ATTRIBUTES attr;
     while (libssh2_sftp_readdir(h, name, 512, &attr) > 0) {
-        if (!strcmp(name,".") || !strcmp(name,"..")) continue;
+        if (!strcmp(name,".")) continue;
+        if (name[0] == '.' && strcmp(name,"..") && !show_hidden) continue;
         int is_dir = LIBSSH2_SFTP_S_ISDIR(attr.permissions);
         char perm[12] = "";
         if (attr.permissions) {
@@ -178,9 +206,10 @@ static int remote_cd(const char *sub) {
     char np[1024];
     if (!strcmp(sub,"..")) {
         char *s = strrchr(ent[1].path, '/');
-        if (s && s != ent[1].path) { *s = 0; return remote_read(ent[1].path); }
+        if (s == ent[1].path && s[1] == 0) return remote_read("/");
+        if (s) { *s = 0; return remote_read(ent[1].path); }
+        return 0;
     } else { path_join(np, ent[1].path, sub); return remote_read(np); }
-    return 0;
 }
 
 // ─── Transfer ───
@@ -232,8 +261,10 @@ static void pane_draw(int side) {
     int rows, cols; getmaxyx(stdscr, rows, cols);
     int pw = (cols - 3) / 2, ph = rows - 4;
     int px = side ? pw + 3 : 0;
-    // Recreate windows on terminal resize
-    if (w_pane[side]) {
+    // Recreate windows on terminal resize or if not yet created
+    if (!w_pane[side]) {
+        w_pane[side] = newwin(ph, pw, 2, px);
+    } else {
         int wy, wx; getbegyx(w_pane[side], wy, wx);
         if (wx != px || wy != 2 || getmaxy(w_pane[side]) != ph || getmaxx(w_pane[side]) != pw) {
             delwin(w_pane[side]);
@@ -254,7 +285,14 @@ static void pane_draw(int side) {
     wattroff(w, COLOR_PAIR(hi ? 1 : 3));
 
     // Path
-    mvwprintw(w, 1, 1, "%-*.*s", pw-2, pw-2, ent[side].path);
+    const char *disp_path = (path_edit && side == act) ? path_buf : ent[side].path;
+    mvwprintw(w, 1, 1, "%-*.*s", pw-2, pw-2, disp_path);
+    if (path_edit && side == act) {
+        // Show cursor at end of path
+        wattron(w, A_BLINK);
+        mvwaddch(w, 1, 1 + strlen(disp_path) % (pw-2), '_');
+        wattroff(w, A_BLINK);
+    }
 
     // Files
     Entries *en = &ent[side];
@@ -266,7 +304,8 @@ static void pane_draw(int side) {
         Entry *e = &en->e[i + en->scr];
         int y = i + 2;
         int sel = (i + en->scr == en->sel);
-        if (sel) wattron(w, COLOR_PAIR(7));
+        if (sel && hi) wattron(w, COLOR_PAIR(7));
+        else if (sel) wattron(w, A_REVERSE);
         else if (e->is_dir) wattron(w, COLOR_PAIR(4));
 
         char size_str[16] = "";
@@ -282,16 +321,15 @@ static void pane_draw(int side) {
         char disp[256]; snprintf(disp, 256, "%s%s", e->name, suffix);
         mvwprintw(w, y, 1 + (e->perm[0] ? 11 : 0), "%-*s %s", pad, disp, size_str);
 
-        if (sel) wattroff(w, COLOR_PAIR(7));
+        if (sel) { wattroff(w, COLOR_PAIR(7)); wattroff(w, A_REVERSE); }
         else if (e->is_dir) wattroff(w, COLOR_PAIR(4));
     }
     wrefresh(w);
 }
 static void status_draw(const char *msg, int is_err) {
     int rows, cols; getmaxyx(stdscr, rows, cols);
-    if (!w_status) {
-        w_status = newwin(1, cols, rows-1, 0);
-    }
+    if (w_status) delwin(w_status);
+    w_status = newwin(1, cols, rows-1, 0);
     werase(w_status);
     if (is_err) wattron(w_status, COLOR_PAIR(5));
     else wattron(w_status, COLOR_PAIR(6));
@@ -303,9 +341,9 @@ static void status_draw(const char *msg, int is_err) {
 static void refresh_all(const char *msg, int is_err) {
     int rows, cols; getmaxyx(stdscr, rows, cols);
     move(0, 0); clrtoeol(); attron(A_BOLD);
-    mvprintw(0, (cols-12)/2, "  xFTP xl_qd  ");
+    mvprintw(0, (cols-12)/2, "  xftp_xlqd_c  ");
     attroff(A_BOLD);
-    mvprintw(rows-2, 0, "  Tab=切换  Enter=进入  F5=传输  F7=新建目录  F8=删除  F10=退出");
+    mvprintw(rows-2, 0, "Esc 取消  Tab=切换  /=路径编辑  Enter/Back=进入/上级  F2=显隐  F6=新建文件  F7=新建目录  F8=删除  F9=传输  F10=退出");
     wnoutrefresh(stdscr);
     pane_draw(0); pane_draw(1);
     status_draw(msg, is_err);
@@ -404,9 +442,81 @@ static void op_mkdir(void) {
     refresh_all(ok ? "目录已创建" : "创建失败", !ok);
 }
 
+static void op_create_file(void) {
+    char name[128] = "";
+    input_dialog("输入新文件名：", name, 128);
+    if (!name[0]) return;
+    int ok = 0;
+    if (act == 0) {  // local
+        char fp[1024]; path_join(fp, ent[0].path, name);
+        FILE *f = fopen(fp, "w"); if (f) { fclose(f); ok = 1; }
+        if (ok) local_read(ent[0].path);
+    } else {  // remote
+        if (sftp) {
+            LIBSSH2_SFTP_HANDLE *h = libssh2_sftp_open(sftp, name,
+                LIBSSH2_FXF_WRITE | LIBSSH2_FXF_CREAT | LIBSSH2_FXF_TRUNC,
+                LIBSSH2_SFTP_S_IRUSR | LIBSSH2_SFTP_S_IWUSR);
+            if (h) { libssh2_sftp_close(h); ok = 1; }
+            if (ok) remote_read(ent[1].path);
+        }
+    }
+    refresh_all(ok ? "文件已创建" : "创建失败", !ok);
+}
+
+// ─── Host selection dialog ───
+static int host_select_dialog(void) {
+    cfg_load();
+    int n = cfg_host_n + 1;  // +1 for "新建连接"
+    int sel = 0, scr = 0;
+    while (1) {
+        int rows, cols; getmaxyx(stdscr, rows, cols);
+        int h = n + 2 > rows - 8 ? rows - 8 : n + 2;
+        if (h < 5) h = 5;
+        int w = 60, x = (cols-w)/2, y = (rows-h)/2;
+        WINDOW *d = newwin(h, w, y, x);
+        wattron(d, COLOR_PAIR(1)); box(d, 0, 0); wattroff(d, COLOR_PAIR(1));
+        mvwprintw(d, 0, 2, "  选择主机  ");
+        int mh = h - 3;
+        if (sel < scr) scr = sel; if (sel >= scr + mh) scr = sel - mh + 1;
+        for (int i = 0; i < mh && i + scr < n; i++) {
+            int idx = i + scr;
+            char buf[60]; 
+            if (idx < cfg_host_n) snprintf(buf,60,"%d. %s", idx+1, cfg_hosts[idx]);
+            else snprintf(buf,60,"%d. + 新建连接", idx+1);
+            if (idx == sel) wattron(d, COLOR_PAIR(7));
+            mvwprintw(d, i+1, 2, "%-*s", w-4, buf);
+            if (idx == sel) wattroff(d, COLOR_PAIR(7));
+        }
+        mvwprintw(d, h-1, 2, "  Enter=选择  q=退出  ");
+        wrefresh(d);
+
+        int ch = getch();
+        if (ch == 'q' || ch == 'Q' || ch == 27) { delwin(d); return -1; }
+        if (ch == KEY_UP && sel > 0) sel--;
+        if (ch == KEY_DOWN && sel < n-1) sel++;
+        if (ch == KEY_HOME) { sel = 0; scr = 0; }
+        if (ch == KEY_END) { sel = n-1; }
+        if (ch == '\n' || ch == KEY_ENTER) {
+            if (sel < cfg_host_n) {
+                // Parse saved host: host:port:user
+                char entry[256]; strncpy(entry, cfg_hosts[sel], 255);
+                char *p = strchr(entry, ':');
+                if (p) { *p++ = 0; cfg_port = atoi(p);
+                    char *u = strchr(p, ':');
+                    if (u) { *u++ = 0; strncpy(cfg_user, u, 63); }
+                }
+                strncpy(cfg_host, entry, 127);
+                delwin(d); return 0;
+            } else {
+                delwin(d); return 1;  // 新建连接
+            }
+        }
+        delwin(d);
+    }
+}
+
 // ─── Connection dialog ───
 static int connect_dialog(void) {
-    cfg_load();
     input_dialog("主机地址（hostname 或 IP）：", cfg_host, 127);
     if (!cfg_host[0]) return -1;
     input_dialog("用户名：", cfg_user, 63);
@@ -428,13 +538,33 @@ int main(void) {
     ui_init();
     refresh_all("正在连接...", 0);
 
-    if (connect_dialog() < 0) { ui_end(); libssh2_exit(); return 1; }
+    int ret = host_select_dialog();
+    if (ret < 0) { ui_end(); libssh2_exit(); return 1; }
+    if (ret > 0) {  // 新建连接
+        if (connect_dialog() < 0) { ui_end(); libssh2_exit(); return 1; }
+    } else {  // 历史主机
+        if (!cfg_pass[0]) {
+            input_dialog("密码：", cfg_pass, 127);
+            if (!cfg_pass[0]) { ui_end(); libssh2_exit(); return 1; }
+            // Save password to config for next time
+            cfg_save();
+        }
+    }
 
     refresh_all("正在连接 SFTP...", 0);
     if (sftp_connect() < 0) {
         refresh_all("连接失败！", 1);
         napms(2000);
         ui_end(); libssh2_exit(); return 1;
+    }
+    // Save host to history if new
+    if (ret > 0) {
+        char entry[256]; snprintf(entry,256,"%s:%d:%s", cfg_host, cfg_port, cfg_user);
+        int found = 0;
+        for (int i = 0; i < cfg_host_n; i++)
+            if (!strcmp(cfg_hosts[i], entry)) { found = 1; break; }
+        if (!found && cfg_host_n < MAX_HOSTS)
+            strncpy(cfg_hosts[cfg_host_n++], entry, 255);
     }
     cfg_save();
 
@@ -451,10 +581,48 @@ int main(void) {
         int ch = getch();
         Entries *en = &ent[act];
 
+        // Path editing mode
+        if (path_edit) {
+            if (ch == 27) { path_edit = 0; continue; }  // Escape → cancel
+            if (ch == '\n' || ch == KEY_ENTER) {
+                path_edit = 0;
+                if (path_buf[0]) {
+                    if (act == 0) { local_read(path_buf); strcpy(ent[0].path, path_buf); }
+                    else if (sftp) { remote_read(path_buf); strcpy(ent[1].path, path_buf); }
+                    en->sel = 0; en->scr = 0;
+                }
+                continue;
+            }
+            if (ch == KEY_BACKSPACE || ch == 127) {
+                int l = strlen(path_buf);
+                if (l > 0) path_buf[l-1] = 0;
+                continue;
+            }
+            if (ch >= 32 && ch < 127) {
+                int l = strlen(path_buf);
+                if (l < 1020) { path_buf[l] = ch; path_buf[l+1] = 0; }
+                continue;
+            }
+            continue;
+        }
+
         switch (ch) {
             case 9:  // Tab
             case KEY_BTAB:
                 act = !act;
+                break;
+
+            case '/':
+                strncpy(path_buf, ent[act].path, 1023);
+                path_edit = 1;
+                break;
+
+            case KEY_BACKSPACE:
+            case 127:
+                // 返回上一级
+                if (act == 0) local_cd("..");
+                else remote_cd("..");
+                en->sel = 0; en->scr = 0;
                 break;
 
             case KEY_UP:
@@ -502,8 +670,14 @@ int main(void) {
                 }
                 break;
 
-            case KEY_F(5):
-                op_transfer();
+            case KEY_F(2):
+                show_hidden = !show_hidden;
+                local_read(ent[0].path);
+                if (sftp) remote_read(ent[1].path);
+                break;
+
+            case KEY_F(6):
+                op_create_file();
                 break;
 
             case KEY_F(7):
@@ -514,6 +688,10 @@ int main(void) {
                 op_delete();
                 break;
 
+            case KEY_F(9):
+                op_transfer();
+                break;
+
             case 'q':
             case 'Q':
             case KEY_F(10):
@@ -521,6 +699,9 @@ int main(void) {
                 break;
 
             case KEY_RESIZE:
+                if (w_pane[0]) { delwin(w_pane[0]); w_pane[0]=NULL; }
+                if (w_pane[1]) { delwin(w_pane[1]); w_pane[1]=NULL; }
+                if (w_status) { delwin(w_status); w_status=NULL; }
                 break;
 
             default:
