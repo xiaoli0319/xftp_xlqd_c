@@ -143,9 +143,13 @@ static int local_cd(const char *sub) {
     char np[1024];
     if (!strcmp(sub,"..")) {
         char *s = strrchr(ent[0].path, '/');
-        if (s == ent[0].path && s[1] == 0) return local_read("/");
-        if (s) { *s = 0; return local_read(ent[0].path); }
-        return 0;
+        if (!s) return 0;
+        if (s == ent[0].path) {  // 路径以 / 开头 (/home 或 /)
+            s[1] = 0;  // /home → /
+            return local_read("/");
+        }
+        *s = 0;  // /home/user → /home
+        return local_read(ent[0].path);
     } else { path_join(np, ent[0].path, sub); return local_read(np); }
 }
 
@@ -206,9 +210,10 @@ static int remote_cd(const char *sub) {
     char np[1024];
     if (!strcmp(sub,"..")) {
         char *s = strrchr(ent[1].path, '/');
-        if (s == ent[1].path && s[1] == 0) return remote_read("/");
-        if (s) { *s = 0; return remote_read(ent[1].path); }
-        return 0;
+        if (!s) return 0;
+        if (s == ent[1].path) { s[1] = 0; return remote_read("/"); }
+        *s = 0;
+        return remote_read(ent[1].path);
     } else { path_join(np, ent[1].path, sub); return remote_read(np); }
 }
 
