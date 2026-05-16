@@ -383,12 +383,8 @@ static const char *sys_protect[] = {
 };
 
 static int is_protected(const char *path) {
-    for (int i = 0; sys_protect[i]; i++) {
-        int plen = strlen(sys_protect[i]);
-        if (strncmp(path, sys_protect[i], plen) == 0 &&
-            (path[plen] == 0 || path[plen] == '/'))
-            return 1;
-    }
+    for (int i = 0; sys_protect[i]; i++)
+        if (!strcmp(path, sys_protect[i])) return 1;
     return 0;
 }
 
