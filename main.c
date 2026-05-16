@@ -217,24 +217,59 @@ static int remote_cd(const char *sub) {
     } else { path_join(np, ent[1].path, sub); return remote_read(np); }
 }
 
+static void status_draw(const char *msg, int is_err);
+
+// ─── Size formatting ───
+static void fmt_size(char *buf, int len, off_t size) {
+    if (size < 1024) snprintf(buf, len, "%ldB", (long)size);
+    else if (size < 1024*1024) snprintf(buf, len, "%.1fK", size/1024.0);
+    else snprintf(buf, len, "%.1fM", size/(1024.0*1024));
+}
+
 // ─── Transfer ───
 static int xfer_download(const char *rpath, const char *lpath) {
     LIBSSH2_SFTP_HANDLE *rf = libssh2_sftp_open(sftp, rpath, LIBSSH2_FXF_READ, 0);
     if (!rf) return -1;
+    LIBSSH2_SFTP_ATTRIBUTES attr;
+    off_t total = 0;
+    if (libssh2_sftp_fstat_ex(rf, &attr, 0) == 0 && attr.filesize > 0)
+        total = attr.filesize;
+
     FILE *lf = fopen(lpath, "wb"); if (!lf) { libssh2_sftp_close(rf); return -1; }
-    char buf[16384]; int n;
-    while ((n = libssh2_sftp_read(rf, buf, 16384)) > 0) fwrite(buf, 1, n, lf);
+    char buf[65536]; int n; off_t done = 0;
+    char sdone[32], stotal[32], smsg[80];
+    while ((n = libssh2_sftp_read(rf, buf, sizeof(buf))) > 0) {
+        fwrite(buf, 1, n, lf); done += n;
+        if (total > 0) {
+            int pct = (int)(done * 100 / total);
+            fmt_size(sdone, 32, done); fmt_size(stotal, 32, total);
+            snprintf(smsg, 80, "下载：%d%%（%s/%s）", pct, sdone, stotal);
+        } else {
+            fmt_size(sdone, 32, done);
+            snprintf(smsg, 80, "下载：%s", sdone);
+        }
+        status_draw(smsg, 0);
+    }
     fclose(lf); libssh2_sftp_close(rf);
     return 0;
 }
+
 static int xfer_upload(const char *lpath, const char *rpath) {
     FILE *lf = fopen(lpath, "rb"); if (!lf) return -1;
+    fseek(lf, 0, SEEK_END); off_t total = ftell(lf); fseek(lf, 0, SEEK_SET);
     LIBSSH2_SFTP_HANDLE *rf = libssh2_sftp_open(sftp, rpath,
         LIBSSH2_FXF_WRITE | LIBSSH2_FXF_CREAT | LIBSSH2_FXF_TRUNC,
         LIBSSH2_SFTP_S_IRUSR | LIBSSH2_SFTP_S_IWUSR);
     if (!rf) { fclose(lf); return -1; }
-    char buf[16384]; int n;
-    while ((n = fread(buf, 1, 16384, lf)) > 0) libssh2_sftp_write(rf, buf, n);
+    char buf[65536]; int n; off_t done = 0;
+    char sdone[32], stotal[32], smsg[80];
+    while ((n = fread(buf, 1, sizeof(buf), lf)) > 0) {
+        libssh2_sftp_write(rf, buf, n); done += n;
+        int pct = (int)(done * 100 / total);
+        fmt_size(sdone, 32, done); fmt_size(stotal, 32, total);
+        snprintf(smsg, 80, "上传：%d%%（%s/%s）", pct, sdone, stotal);
+        status_draw(smsg, 0);
+    }
     fclose(lf); libssh2_sftp_close(rf);
     return 0;
 }
