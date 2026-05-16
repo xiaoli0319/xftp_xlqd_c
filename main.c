@@ -305,7 +305,7 @@ static void refresh_all(const char *msg, int is_err) {
     move(0, 0); clrtoeol(); attron(A_BOLD);
     mvprintw(0, (cols-12)/2, "  xFTP xl_qd  ");
     attroff(A_BOLD);
-    mvprintw(rows-2, 0, "  Tab=切换  Shift+方向=进目录  Enter=进入  F5=传输  F7=新建  F8=删除  F10=退出");
+    mvprintw(rows-2, 0, "  Tab=切换  Enter=进入  F5=传输  F7=新建目录  F8=删除  F10=退出");
     wnoutrefresh(stdscr);
     pane_draw(0); pane_draw(1);
     status_draw(msg, is_err);
@@ -463,28 +463,6 @@ int main(void) {
 
             case KEY_DOWN:
                 if (en->sel < en->n - 1) en->sel++;
-                break;
-
-            case KEY_SLEFT:  // Shift+← 进本地目录
-                {
-                Entries *le = &ent[0];
-                if (le->n > 0 && le->sel >= 0 && le->sel < le->n && le->e[le->sel].is_dir) {
-                    char buf[256]; strcpy(buf, le->e[le->sel].name);
-                    local_cd(buf);
-                    le->sel = 0; le->scr = 0;
-                }
-                }
-                break;
-
-            case KEY_SRIGHT:  // Shift+→ 进远程目录
-                {
-                Entries *re = &ent[1];
-                if (re->n > 0 && re->sel >= 0 && re->sel < re->n && re->e[re->sel].is_dir) {
-                    char buf[256]; strcpy(buf, re->e[re->sel].name);
-                    remote_cd(buf);
-                    re->sel = 0; re->scr = 0;
-                }
-                }
                 break;
 
             case KEY_PPAGE:  // PageUp
