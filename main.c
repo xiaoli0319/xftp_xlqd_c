@@ -380,6 +380,24 @@ static void input_dialog(const char *prompt, char *buf, int len) {
     delwin(d); refresh_all(NULL, 0);
 }
 
+// ─── 系统敏感路径保护 ───
+static const char *sys_protect[] = {
+    "/", "/etc", "/bin", "/sbin", "/lib", "/lib64",
+    "/usr", "/usr/bin", "/usr/lib", "/usr/share",
+    "/boot", "/dev", "/proc", "/sys", "/var", "/root",
+    NULL
+};
+
+static int is_protected(const char *path) {
+    for (int i = 0; sys_protect[i]; i++) {
+        int plen = strlen(sys_protect[i]);
+        if (strncmp(path, sys_protect[i], plen) == 0 &&
+            (path[plen] == 0 || path[plen] == '/'))
+            return 1;
+    }
+    return 0;
+}
+
 // ─── Operations ───
 static void op_transfer(void) {
     Entries *src = &ent[act];
@@ -412,6 +430,15 @@ static void op_delete(void) {
     Entry *e = &en->e[en->sel];
     char msg[256]; snprintf(msg,256,"确认删除 %s%s？", e->name, e->is_dir?"/":"");
     if (!confirm_dialog(msg)) return;
+
+    // 系统敏感路径二次确认
+    char fp[1024];
+    if (act == 0) path_join(fp, ent[0].path, e->name);
+    else path_join(fp, ent[1].path, e->name);
+    if (is_protected(fp)) {
+        char w2[256]; snprintf(w2,256,"⚠ 警告：%s 是系统关键路径，二次确认删除？", fp);
+        if (!confirm_dialog(w2)) return;
+    }
 
     int ok = 0;
     if (act == 0) {  // local
